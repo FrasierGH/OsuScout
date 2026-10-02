@@ -267,3 +267,100 @@ jobs:
           path: Releases/
           if-no-files-found: warn
           retention-days: 14
+
+  # The same app for Linux, as an AppImage. It runs after the Windows job, so the
+  # release already exists and the Linux files are merged into it. Velopack keeps
+  # each OS on its own channel (releases.win.json / releases.linux.json), so the
+  # two never mix.
+  release-linux:
+    name: Build, package and publish (Linux)
+    needs: [decide, release]
+    if: needs.decide.outputs.build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish
+        run: |
+          rm -rf publish
+          dotnet publish OsuScoutNew/OsuScoutNew.csproj \
+            -c Release \
+            -r linux-x64 \
+            --self-contained true \
+            -o publish
+
+      # Same check as on Windows: the packaged model must be the repo's model.
+      - name: Verify the packaged model is the repo's model
+        run: |
+          bad=0
+          for f in ensemble_model_1.onnx ensemble_model_2.onnx ensemble_model_3.onnx \
+                   ensemble_model_4.onnx ensemble_model_5.onnx model_config.json; do
+            if ! cmp -s "OsuScoutNew/Assets/$f" "publish/Assets/$f"; then
+              echo "::error::publish/Assets/$f is missing or differs from OsuScoutNew/Assets/$f"
+              bad=1
+            fi
+          done
+          [ "$bad" -eq 0 ] || exit 1
+          echo "All 5 ONNX models and model_config.json match OsuScoutNew/Assets byte for byte."
+
+      # Same pinned version as the Windows job (see there).
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk --version 0.0.869
+
+      # Same app identity and title as the Windows package. Linux takes a PNG icon.
+      - name: Package
+        run: |
+          vpk pack \
+            --packId ScoutsuLazer \
+            --packTitle Scoutsu \
+            --icon branding/scoutsu_256.png \
+            --packVersion "${{ needs.decide.outputs.version }}" \
+            --packDir publish \
+            --mainExe OsuScoutNew
+
+      - name: Add to the GitHub Release
+        if: needs.decide.outputs.dry_run == 'false'
+        run: |
+          vpk upload github \
+            --repoUrl "https://github.com/${{ github.repository }}" \
+            --token "${{ github.token }}" \
+            --tag "${{ needs.decide.outputs.version }}" \
+            --releaseName "Scoutsu ${{ needs.decide.outputs.version }}" \
+            --merge \
+            --publish
+
+      # vpk names the AppImage after --packId; give it the app's name and say which
+      # system it's for. The updater only reads releases.linux.json and the .nupkg.
+      - name: Give the download the app's name
+        if: needs.decide.outputs.dry_run == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          url=$(gh release view "$VERSION" --json assets --jq '.assets[] | select(.name == "ScoutsuLazer.AppImage") | .apiUrl')
+          if [ -z "$url" ]; then
+            echo "::error::ScoutsuLazer.AppImage not found on release $VERSION"
+            exit 1
+          fi
+          gh api -X PATCH "$url" -f name="Scoutsu-linux-x64.AppImage" --jq '"renamed to " + .name'
+
+      - name: Dry run summary
+        if: needs.decide.outputs.dry_run == 'true'
+        run: |
+          echo "Dry run complete - nothing was published."
+          ls -lh Releases/
+
+      - name: Upload packages as a build artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: velopack-packages-linux-${{ needs.decide.outputs.version }}
+          path: Releases/
+          if-no-files-found: warn
+          retention-days: 14

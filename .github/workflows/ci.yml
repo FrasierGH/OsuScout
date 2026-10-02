@@ -82,6 +82,11 @@ jobs:
       - name: Unit tests
         run: dotnet test tests/OsuScoutNew.Tests -c Release
 
+      # The app itself is cross-platform (Avalonia) and ships for Linux too, so it
+      # must build here as well as on Windows.
+      - name: Build app (Linux)
+        run: dotnet build OsuScoutNew/OsuScoutNew.csproj -c Release
+
       - name: Build ParityDump
         run: dotnet build parity/ParityDump -c Release
 
