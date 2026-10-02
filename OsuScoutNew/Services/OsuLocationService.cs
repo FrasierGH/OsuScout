@@ -15,7 +15,8 @@ namespace OsuScoutNew.Services
             string defaultPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "osu!", "Songs");
             if (Directory.Exists(defaultPath)) return defaultPath;
 
-            // 2. Try Windows Registry
+            // 2. Try Windows Registry (stable registers an osu:// handler there)
+            if (OperatingSystem.IsWindows())
             try
             {
                 using (var key = Registry.ClassesRoot.OpenSubKey(@"osu\shell\open\command"))

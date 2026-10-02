@@ -1,0 +1,24 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="OsuScoutNew.App"
+             RequestedThemeVariant="Dark">
+    <Application.Styles>
+        <!-- Fluent, recoloured to a flat dark desktop palette (in the spirit of Qt's Fusion
+             style, as used by MKVToolNix) and set to compact density. -->
+        <FluentTheme DensityStyle="Compact">
+            <FluentTheme.Palettes>
+                <ColorPaletteResources x:Key="Dark"
+                                       Accent="#FFD94F8F"
+                                       RegionColor="#FF2B2B2B"
+                                       AltHigh="#FF202020" AltMedium="#FF262626" AltMediumLow="#FF2B2B2B" AltLow="#FF303030" AltMediumHigh="#FF242424"
+                                       ChromeAltLow="#FFB0B0B0" ChromeBlackHigh="#FF000000" ChromeBlackMedium="#FF000000"
+                                       ChromeHigh="#FF5A5A5A" ChromeMedium="#FF3A3A3A" ChromeMediumLow="#FF333333" ChromeLow="#FF2B2B2B"
+                                       ChromeDisabledHigh="#FF474747" ChromeDisabledLow="#FF808080" ChromeGray="#FF808080" ChromeWhite="#FFE2E2E2"
+                                       BaseHigh="#FFE2E2E2" BaseMediumHigh="#FFC8C8C8" BaseMedium="#FFB0B0B0" BaseMediumLow="#FF808080" BaseLow="#FF474747"
+                                       ListLow="#FF313131" ListMedium="#FF3A3A3A" />
+            </FluentTheme.Palettes>
+        </FluentTheme>
+        <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
+        <StyleInclude Source="avares://OsuScoutNew/Theme.axaml" />
+    </Application.Styles>
+</Application>

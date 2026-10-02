@@ -2,11 +2,13 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- Plain net10.0: the window is Avalonia, so one build runs on Windows and Linux. -->
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>disable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UseWPF>true</UseWPF>
     <StartupObject>OsuScoutNew.Program</StartupObject>
+    <!-- Bindings in the XAML are resolved at run time (no x:DataType needed). -->
+    <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
     <!-- THE release number. Bump it in a PR and merging that PR ships it to users
          (see .github/workflows/release.yml). MAJOR.MINOR.PATCH: breaking change /
          new feature / bug fix only. -->
@@ -14,15 +16,19 @@
 
     <!-- What users see. Task Manager and file properties show AssemblyTitle; the exe,
          its shortcuts and the taskbar use ApplicationIcon (regenerate it with
-         branding/make_icon.py). The project, exe and Velopack ID all stay
-         "OsuScoutNew": the ID is how installed copies find their updates. -->
+         branding/make_icon.py). The project and exe stay "OsuScoutNew"; the Velopack ID
+         (ScoutsuLazer) is set in release.yml. -->
     <Product>Scoutsu</Product>
     <AssemblyTitle>Scoutsu</AssemblyTitle>
     <ApplicationIcon>Assets\scoutsu.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="MahApps.Metro" Version="2.4.11" />
+    <PackageReference Include="Avalonia" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.3" />
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="12.1.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.9" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.27.0" />
     <PackageReference Include="Rosu.Net" Version="1.0.4" />
@@ -37,6 +43,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\OsuScoutNew.Core\OsuScoutNew.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The window icon, loaded at run time; the exe icon is ApplicationIcon above. -->
+    <AvaloniaResource Include="Assets\scoutsu.ico" />
   </ItemGroup>
 
   <ItemGroup>

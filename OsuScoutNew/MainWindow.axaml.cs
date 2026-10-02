@@ -1,21 +1,24 @@
 using OsuScout;
+using OsuScoutNew.Controls;
 using OsuScoutNew.Core;
 using OsuScoutNew.Services;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
-using System.Windows;
-using System.Windows.Input;
-using System.Windows.Threading;
-using System.Windows.Media;
-using System.Windows.Interop;
 using System.Threading.Tasks;
+using Avalonia;
+using Avalonia.Collections;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Input.Platform;
+using Avalonia.Interactivity;
+using Avalonia.Media;
+using Avalonia.Platform.Storage;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Velopack;
 using Velopack.Sources;
-using System.ComponentModel;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using MahApps.Metro.Controls;
 
 namespace OsuScoutNew
 {
@@ -35,17 +38,24 @@ namespace OsuScoutNew
         private OsuLibraryService _libraryService;
         private OsuLiveTrackerService _liveTrackerService;
 
-        // DataGrid wipes its sort every time ItemsSource is replaced, which UpdateGrid does on every
-        // filter change, so the sort lives here and is reapplied after each refresh.
-        private List<SortDescription> _sort = new List<SortDescription>();
+        // The list's sort, by column (SortMemberPath). Every refresh replaces the list's items,
+        // so the sort lives here and is reapplied each time.
+        private List<(string Path, ListSortDirection Direction)> _sort = new();
+        // Shift held on the last click in the list, for multi-column sorting.
+        private bool _shiftOnLastClick;
         private bool _restoringSettings;
+        private AppSettings _settings;
 
         // Every range filter: its slider, value label and clear button, and how a value reads.
         private (RangeSlider Slider, TextBlock Label, Button Reset, Func<double, string> Format, string Unit)[] _ranges;
 
         // The map list's columns as the XAML defines them, for "Reset columns".
-        private Dictionary<DataGridColumn, (DataGridLength Width, Visibility Visibility)> _defaultColumns;
-        private ContextMenu _columnMenu;
+        private Dictionary<DataGridColumn, (DataGridLength Width, bool Visible)> _defaultColumns;
+
+        // The window's size and place while not maximised, kept so it can be saved even while
+        // maximised (Avalonia has no RestoreBounds).
+        private PixelPoint _normalPosition;
+        private Size _normalSize;
 
         // The model that produced each library's stored tags (AppSettings.TaggedWithModel and
         // LazerTaggedWithModel).
@@ -79,55 +89,73 @@ namespace OsuScoutNew
                 (OdSlider, OdValueText, OdResetButton, v => $"{v:0.0}", ""),
                 (HpSlider, HpValueText, HpResetButton, v => $"{v:0.0}", ""),
             };
-            SetUpColumnMenu();
-            var settings = SettingsService.Load();
-            _taggedWithModel = settings.TaggedWithModel;
-            _lazerTaggedWithModel = settings.LazerTaggedWithModel;
-            _songsFolder = settings.SongsFolder;
-            _lazerDataFolder = settings.LazerDataFolder;
-            _gameProcessNames = settings.GameProcessNames;
-            _client = settings.Client ?? PickClientOnFirstRun();
+            foreach (var range in _ranges)
+            {
+                range.Slider.ValueChanged += Slider_ValueChanged;
+                range.Reset.Tag = range.Slider;
+            }
+            _defaultColumns = BeatmapGrid.Columns.ToDictionary(c => c, c => (c.Width, c.IsVisible));
+            BeatmapGrid.AddHandler(PointerPressedEvent, (_, e) => _shiftOnLastClick = e.KeyModifiers.HasFlag(KeyModifiers.Shift), RoutingStrategies.Tunnel);
+            BeatmapGrid.AddHandler(ContextRequestedEvent, BeatmapGrid_ContextRequested, RoutingStrategies.Bubble);
+
+            _settings = SettingsService.Load();
+            _taggedWithModel = _settings.TaggedWithModel;
+            _lazerTaggedWithModel = _settings.LazerTaggedWithModel;
+            _songsFolder = _settings.SongsFolder;
+            _lazerDataFolder = _settings.LazerDataFolder;
+            _gameProcessNames = _settings.GameProcessNames;
+            RestorePlacement(_settings.Window);
 
             _classifier = new OsuClassifier();
             _classifier.Initialize();
+            SetUpTagSuggestions(_classifier.Config.tags);
 
             _libraryService = new OsuLibraryService(_classifier);
             _liveTrackerService = new OsuLiveTrackerService(_libraryService);
-            _liveTrackerService.MapProcessed += () => Dispatcher.Invoke(UpdateGrid);
+            _liveTrackerService.MapProcessed += () => Dispatcher.UIThread.Post(UpdateGrid);
 
-            this.Loaded += MainWindow_Loaded;
+            PositionChanged += (_, _) => RememberNormalBounds();
+            Resized += (_, _) => RememberNormalBounds();
+            Opened += async (_, _) => await StartAsync();
+        }
 
-            ReportPreviousScanCrash();
+        // What needs the window on screen: questions asked in dialogs, then the library.
+        private async Task StartAsync()
+        {
+            SystemInteropService.UseDarkTitleBar(TryGetPlatformHandle()?.Handle ?? IntPtr.Zero);
+            RememberNormalBounds();
+            await ReportPreviousScanCrash();
+            _client = _settings.Client ?? await PickClientOnFirstRun();
+
+            RestoreSettings(_settings);
             OpenLibrary();
-
-            TagSearchBox.ItemsSource = _classifier.Config.tags;
-            RestoreSettings(settings);
             UpdateFilterLabels();
             UpdateGrid();
+            _ = UpdateAppAsync();
         }
 
         // A scan that took the whole app down leaves a log with no ending (see ScanLog). Say so
         // once, skip the maps it was reading, and point at the log so the crash can be reported.
-        private static void ReportPreviousScanCrash()
+        private async Task ReportPreviousScanCrash()
         {
             var maps = ScanLog.RecoverFromCrash();
             if (maps.Count == 0) return;
 
             string list = string.Join("\n", maps.Take(12).Select(m => "• " + m));
             if (maps.Count > 12) list += $"\n…and {maps.Count - 12} more";
-            var answer = MessageDialog.Show(null,
+            var answer = await MessageDialog.ShowAsync(this,
                 "Scoutsu closed unexpectedly the last time it scanned your maps. It was reading these when it stopped:\n\n" +
                 list + "\n\n" +
                 "They'll be skipped from now on so the scan can finish.\n\n" +
                 "If you can, please report this at github.com/FrasierGH/OsuScout/issues and attach the file " +
                 "scan-previous.log. Open the folder with that file now?",
-                "Scoutsu closed unexpectedly", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-            if (answer == MessageBoxResult.Yes)
-                System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{ScanLog.PreviousLogPath}\"");
+                "Scoutsu closed unexpectedly", DialogButtons.YesNo, DialogIcon.Warning);
+            if (answer == DialogResult.Yes)
+                SystemInteropService.ShowInFileManager(ScanLog.PreviousLogPath);
         }
 
         // Only asked once: afterwards AppSettings.Client remembers the choice.
-        private static OsuClient PickClientOnFirstRun()
+        private async Task<OsuClient> PickClientOnFirstRun()
         {
             bool stable = OsuLocationService.FindOsuSongsFolder() != null;
             bool lazer = LazerLocationService.FindDataFolder() != null;
@@ -135,10 +163,10 @@ namespace OsuScoutNew
             var pick = GameClients.PickOnFirstRun(stable, lazer);
             if (pick != null) return pick.Value;
 
-            var answer = MessageDialog.Show(null,
+            var answer = await MessageDialog.ShowAsync(this,
                 "Scoutsu found both osu!stable and osu!lazer on this PC.\n\nShow your osu!lazer library? Choose No for osu!stable.\n\nYou can switch at any time with the Library picker at the top.",
-                "Which osu!?", MessageBoxButton.YesNo, MessageBoxImage.Question);
-            return answer == MessageBoxResult.Yes ? OsuClient.Lazer : OsuClient.Stable;
+                "Which osu!?", DialogButtons.YesNo, DialogIcon.Question);
+            return answer == DialogResult.Yes ? OsuClient.Lazer : OsuClient.Stable;
         }
 
         private IBeatmapSource CreateSource(OsuClient client)
@@ -183,13 +211,13 @@ namespace OsuScoutNew
             _showingClient = true;
             ClientCombo.SelectedIndex = _client == OsuClient.Lazer ? 1 : 0;
             _showingClient = false;
-            FolderButton.ToolTip = _client == OsuClient.Lazer ? "Pick your osu!lazer data folder" : "Pick your osu! Songs folder";
+            ToolTip.SetTip(FolderButton, _client == OsuClient.Lazer ? "Pick your osu!lazer data folder" : "Pick your osu! Songs folder");
         }
 
         private void ClientCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             // OpenLibrary sets the selection to match _client; only a user's pick switches.
-            if (_showingClient || _libraryService == null) return;
+            if (_showingClient || _source == null) return;
             var picked = ClientCombo.SelectedIndex == 1 ? OsuClient.Lazer : OsuClient.Stable;
             if (picked == _client) return;
 
@@ -202,7 +230,7 @@ namespace OsuScoutNew
 
         private async void RunBackgroundScan()
         {
-            ProgressPanel.Visibility = Visibility.Visible;
+            ProgressPanel.IsVisible = true;
             PlayButton.IsEnabled = false;
             // Switching mid-scan would leave this scan's progress on the other library's screen.
             ClientCombo.IsEnabled = false;
@@ -217,10 +245,10 @@ namespace OsuScoutNew
             {
                 if (!System.IO.Directory.Exists(_source.Root))
                 {
-                    MessageDialog.Show(this, _client == OsuClient.Lazer
+                    await MessageDialog.ShowAsync(this, _client == OsuClient.Lazer
                         ? "Could not find your osu!lazer data folder.\n\nPick it with Folder…: it's the folder holding client.realm and a folder called files."
                         : $"Could not find osu! at {_source.Root}.\n\nIf you installed it somewhere else, pick your Songs folder with Folder….",
-                        "Folder not found", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        "Folder not found", DialogButtons.Ok, DialogIcon.Warning);
                     return;
                 }
 
@@ -250,12 +278,12 @@ namespace OsuScoutNew
             }
             catch (Exception ex)
             {
-                MessageDialog.Show(this, $"Something went wrong while scanning. Press Ctrl+C to copy this report.\n\n{ex.Message}\n\n{ex.StackTrace}",
-                    "Scan failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                await MessageDialog.ShowAsync(this, $"Something went wrong while scanning. Press Ctrl+C to copy this report.\n\n{ex.Message}\n\n{ex.StackTrace}",
+                    "Scan failed", DialogButtons.Ok, DialogIcon.Error);
             }
             finally
             {
-                ProgressPanel.Visibility = Visibility.Collapsed;
+                ProgressPanel.IsVisible = false;
                 PlayButton.IsEnabled = true;
                 ClientCombo.IsEnabled = true;
                 UpdateGrid();
@@ -264,34 +292,60 @@ namespace OsuScoutNew
 
         // --- UI UTILITY HANDLERS ---
 
-        // Dark title bar, as on every window in the app.
-        protected override void OnSourceInitialized(EventArgs e)
-        {
-            base.OnSourceInitialized(e);
-            SystemInteropService.UseDarkTitleBar(new WindowInteropHelper(this).Handle);
-        }
+        private IBrush Resource(string key) =>
+            this.TryFindResource(key, ActualThemeVariant, out var value) ? value as IBrush : null;
 
         private void BeatmapGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
+            bool selected = BeatmapGrid.SelectedItem is BeatmapRecord;
             SelectionText.Text = BeatmapGrid.SelectedItem is BeatmapRecord map
                 ? $"{map.Artist} - {map.Title} [{map.Version}]"
                 : "Select a map, or double-click it, to find it in osu!'s song select.";
-            SelectionText.Foreground = (Brush)FindResource(BeatmapGrid.SelectedItem is BeatmapRecord ? "Brush.Text" : "Brush.TextMuted");
+            SelectionText.Foreground = Resource(selected ? "Brush.Text" : "Brush.TextMuted");
         }
 
-        private void SearchInput_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => UpdateGrid();
+        // Alternate row shading. Rows are recycled as the list scrolls, so it follows the index.
+        private void BeatmapGrid_LoadingRow(object sender, DataGridRowEventArgs e) =>
+            e.Row.Classes.Set("alt", e.Row.Index % 2 == 1);
 
-        private void TagSearchBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e) => UpdateGrid();
+        private void SearchInput_TextChanged(object sender, TextChangedEventArgs e) => UpdateGrid();
 
-        private void Slider_ValueChanged(object sender, RoutedEventArgs e)
+        // The tag box suggests tags for the one being typed, after the last comma, and keeps
+        // a leading "-" (exclude) when one is picked.
+        private void SetUpTagSuggestions(IEnumerable<string> tags)
+        {
+            TagSearchBox.ItemsSource = tags.ToList();
+            TagSearchBox.ItemFilter = (search, item) =>
+            {
+                string last = LastTag(search).Trim().TrimStart('-').Trim();
+                return item is string tag && (last.Length == 0 || tag.Contains(last, StringComparison.OrdinalIgnoreCase));
+            };
+            TagSearchBox.TextSelector = (search, item) =>
+            {
+                search ??= "";
+                int comma = search.LastIndexOf(',');
+                string before = comma >= 0 ? search[..(comma + 1)] + " " : "";
+                string dash = LastTag(search).TrimStart().StartsWith('-') ? "-" : "";
+                return before + dash + item;
+            };
+        }
+
+        private static string LastTag(string text)
+        {
+            text ??= "";
+            int comma = text.LastIndexOf(',');
+            return comma >= 0 ? text[(comma + 1)..] : text;
+        }
+
+        private void Slider_ValueChanged(object sender, EventArgs e)
         {
             UpdateFilterLabels();
-            if (SearchBox != null) UpdateGrid();
+            UpdateGrid();
         }
 
         private void ResetSlider_Click(object sender, RoutedEventArgs e)
         {
-            if ((sender as FrameworkElement)?.Tag is RangeSlider slider)
+            if ((sender as Control)?.Tag is RangeSlider slider)
             {
                 slider.UpperValue = slider.Maximum;
                 slider.LowerValue = slider.Minimum;
@@ -300,9 +354,7 @@ namespace OsuScoutNew
 
         private void UpdateFilterLabels()
         {
-            // Slider events fire during InitializeComponent, before every control exists yet.
             if (_ranges == null) return;
-
             foreach (var range in _ranges)
                 ShowRange(range.Slider, range.Label, range.Reset, range.Format, range.Unit);
         }
@@ -320,20 +372,19 @@ namespace OsuScoutNew
             else if (openHigh) label.Text = $"{format(slider.LowerValue)}+{unit}";
             else label.Text = $"{format(slider.LowerValue)} – {format(slider.UpperValue)}{unit}";
 
-            label.Foreground = (Brush)FindResource(active ? "AccentBrush" : "TextMutedBrush");
-            slider.Foreground = (Brush)FindResource(active ? "Brush.AccentStrong" : "Brush.BorderStrong");
-            reset.Visibility = active ? Visibility.Visible : Visibility.Hidden;
+            label.Foreground = Resource(active ? "Brush.Accent" : "Brush.TextMuted");
+            slider.Foreground = Resource(active ? "Brush.AccentStrong" : "Brush.BorderStrong");
+            reset.IsVisible = active;
         }
 
         private async void UpdateGrid()
         {
-            if (_ranges == null || SearchBox == null || TagSearchBox == null || _libraryService == null)
-                return;
+            if (_ranges == null || _source == null) return;
             // Each restored value fires its own change event; one refresh at the end is enough.
             if (_restoringSettings) return;
 
-            string searchText = SearchBox.Text.ToLower().Trim();
-            string tagText = TagSearchBox.Text.ToLower().Trim();
+            string searchText = (SearchBox.Text ?? "").ToLower().Trim();
+            string tagText = (TagSearchBox.Text ?? "").ToLower().Trim();
             double maxStars = UpperBound(StarSlider);
             if (double.IsPositiveInfinity(maxStars) && searchText.Length == 0) maxStars = GimmickStarThreshold;
 
@@ -364,7 +415,7 @@ namespace OsuScoutNew
             var results = await _libraryService.SearchBeatmapsAsync(client, filter);
             // The user switched client while this ran: these rows belong to the other library.
             if (client != _client) return;
-            BeatmapGrid.ItemsSource = results;
+            BeatmapGrid.ItemsSource = new DataGridCollectionView(results);
             ApplySort();
 
             string name = client == OsuClient.Lazer ? "osu!lazer" : "osu!stable";
@@ -374,24 +425,35 @@ namespace OsuScoutNew
 
         private void ApplySort()
         {
-            BeatmapGrid.Items.SortDescriptions.Clear();
-            foreach (var column in BeatmapGrid.Columns)
-                column.SortDirection = null;
-
-            foreach (var sort in _sort)
+            if (BeatmapGrid.ItemsSource is not DataGridCollectionView view) return;
+            view.SortDescriptions.Clear();
+            foreach (var (path, direction) in _sort)
             {
-                var column = BeatmapGrid.Columns.FirstOrDefault(c => c.SortMemberPath == sort.PropertyName);
-                if (column == null) continue;
-
-                column.SortDirection = sort.Direction;
-                BeatmapGrid.Items.SortDescriptions.Add(sort);
+                if (BeatmapGrid.Columns.Any(c => c.SortMemberPath == path))
+                    view.SortDescriptions.Add(DataGridSortDescription.FromPath(path, direction));
             }
+        }
+
+        // Click: ascending, descending, unsorted. Shift-click sorts by more than one column.
+        private void BeatmapGrid_Sorting(object sender, DataGridColumnEventArgs e)
+        {
+            e.Handled = true;
+            string path = e.Column.SortMemberPath;
+            int current = _sort.FindIndex(s => s.Path == path);
+            ListSortDirection? next = current < 0 ? ListSortDirection.Ascending
+                : _sort[current].Direction == ListSortDirection.Ascending ? ListSortDirection.Descending
+                : null;
+
+            if (!_shiftOnLastClick) _sort.Clear();
+            else _sort.RemoveAll(s => s.Path == path);
+
+            if (next != null) _sort.Add((path, next.Value));
+            ApplySort();
         }
 
         private void RestoreSettings(AppSettings settings)
         {
             _restoringSettings = true;
-            RestorePlacement(settings.Window);
             SearchBox.Text = settings.SearchText ?? "";
             TagSearchBox.Text = settings.TagText ?? "";
             SetRange(StarSlider, settings.MinStars, settings.MaxStars);
@@ -403,7 +465,7 @@ namespace OsuScoutNew
             SetRange(HpSlider, settings.MinHP, settings.MaxHP);
             RestoreColumns(settings.Columns);
             _sort = (settings.Sort ?? new List<SortSetting>())
-                .Select(s => new SortDescription(s.Column, s.Descending ? ListSortDirection.Descending : ListSortDirection.Ascending))
+                .Select(s => (s.Column, s.Descending ? ListSortDirection.Descending : ListSortDirection.Ascending))
                 .ToList();
             _restoringSettings = false;
         }
@@ -433,43 +495,53 @@ namespace OsuScoutNew
                 MinHP = Finite(LowerBound(HpSlider)),
                 MaxHP = Finite(UpperBound(HpSlider)),
                 Columns = CurrentColumns(),
-                Sort = _sort.Select(s => new SortSetting { Column = s.PropertyName, Descending = s.Direction == ListSortDirection.Descending }).ToList(),
+                Sort = _sort.Select(s => new SortSetting { Column = s.Path, Descending = s.Direction == ListSortDirection.Descending }).ToList(),
                 TaggedWithModel = _taggedWithModel,
                 LazerTaggedWithModel = _lazerTaggedWithModel,
                 Window = CurrentPlacement()
             });
         }
 
+        // Saved positions are in device-independent units (as the Windows-only version stored
+        // them); Avalonia places windows in pixels, so they're scaled by the screen's DPI.
         private void RestorePlacement(WindowPlacement placement)
         {
             if (placement == null || placement.Width < MinWidth || placement.Height < MinHeight) return;
 
+            var screens = Screens?.All;
+            if (screens == null || screens.Count == 0) return;
             // Skip a position that is no longer on any screen (e.g. a monitor was unplugged).
-            var bounds = new Rect(placement.Left, placement.Top, placement.Width, placement.Height);
-            var desktop = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
-                                   SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
-            if (!desktop.IntersectsWith(bounds)) return;
+            var screen = screens.FirstOrDefault(s =>
+                s.Bounds.Intersects(new PixelRect((int)(placement.Left * s.Scaling), (int)(placement.Top * s.Scaling),
+                                                  (int)(placement.Width * s.Scaling), (int)(placement.Height * s.Scaling))));
+            if (screen == null) return;
 
             WindowStartupLocation = WindowStartupLocation.Manual;
-            Left = placement.Left;
-            Top = placement.Top;
+            Position = new PixelPoint((int)(placement.Left * screen.Scaling), (int)(placement.Top * screen.Scaling));
             Width = placement.Width;
             Height = placement.Height;
             if (placement.Maximized) WindowState = WindowState.Maximized;
+        }
+
+        private void RememberNormalBounds()
+        {
+            if (WindowState != WindowState.Normal) return;
+            _normalPosition = Position;
+            _normalSize = new Size(Width, Height);
         }
 
         // The normal-state bounds, even while maximised or minimised, so un-maximising later
         // returns to the size the user chose.
         private WindowPlacement CurrentPlacement()
         {
-            Rect bounds = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
-            if (bounds.IsEmpty || double.IsNaN(bounds.Width)) return null;
+            if (_normalSize.Width <= 0) return null;
+            double scaling = DesktopScaling > 0 ? DesktopScaling : 1;
             return new WindowPlacement
             {
-                Left = bounds.Left,
-                Top = bounds.Top,
-                Width = bounds.Width,
-                Height = bounds.Height,
+                Left = _normalPosition.X / scaling,
+                Top = _normalPosition.Y / scaling,
+                Width = _normalSize.Width,
+                Height = _normalSize.Height,
                 Maximized = WindowState == WindowState.Maximized
             };
         }
@@ -496,27 +568,20 @@ namespace OsuScoutNew
         private static string ColumnName(DataGridColumn column) =>
             column.Header as string == "★" ? "Stars (★)" : column.Header as string;
 
-        private void SetUpColumnMenu()
+        private void BeatmapGrid_ContextRequested(object sender, ContextRequestedEventArgs e)
         {
-            _defaultColumns = BeatmapGrid.Columns.ToDictionary(c => c, c => (c.Width, c.Visibility));
+            var header = (e.Source as Visual)?.FindAncestorOfType<DataGridColumnHeader>(includeSelf: true);
+            if (header == null) return;   // only the header row has a menu
+            e.Handled = true;
 
-            _columnMenu = new ContextMenu();
-            _columnMenu.Opened += (_, _) => BuildColumnMenu();
-            BeatmapGrid.ColumnHeaderStyle = new Style(typeof(DataGridColumnHeader), (Style)FindResource(typeof(DataGridColumnHeader)))
-            {
-                Setters = { new Setter(ContextMenuProperty, _columnMenu) }
-            };
-        }
-
-        private void BuildColumnMenu()
-        {
-            _columnMenu.Items.Clear();
+            var clicked = BeatmapGrid.Columns.FirstOrDefault(c => Equals(c.Header, header.Content));
+            var menu = new ContextMenu();
             var toggles = new List<MenuItem>();
 
             // The list always keeps at least one column: the last one shown can't be unticked.
             void UpdateToggles()
             {
-                int shown = BeatmapGrid.Columns.Count(c => c.Visibility == Visibility.Visible);
+                int shown = BeatmapGrid.Columns.Count(c => c.IsVisible);
                 foreach (var toggle in toggles) toggle.IsEnabled = !(toggle.IsChecked && shown == 1);
             }
 
@@ -525,34 +590,35 @@ namespace OsuScoutNew
                 var toggle = new MenuItem
                 {
                     Header = ColumnName(column),
-                    IsCheckable = true,
-                    IsChecked = column.Visibility == Visibility.Visible,
+                    ToggleType = MenuItemToggleType.CheckBox,
+                    IsChecked = column.IsVisible,
                     StaysOpenOnClick = true
                 };
                 toggle.Click += (_, _) =>
                 {
-                    column.Visibility = toggle.IsChecked ? Visibility.Visible : Visibility.Collapsed;
+                    column.IsVisible = toggle.IsChecked;
                     UpdateToggles();
                     SaveSettings();
                 };
                 toggles.Add(toggle);
-                _columnMenu.Items.Add(toggle);
+                menu.Items.Add(toggle);
             }
             UpdateToggles();
 
-            _columnMenu.Items.Add(new Separator());
-            // The header that was right-clicked; none for the empty area right of the last column.
-            if ((_columnMenu.PlacementTarget as DataGridColumnHeader)?.Column is DataGridColumn clicked)
-                AddMenuAction($"Size \u201c{ColumnName(clicked)}\u201d to fit", () => SizeColumnsToFit(new[] { clicked }, fillWindow: false));
-            AddMenuAction("Size all columns to fit", () => SizeColumnsToFit(BeatmapGrid.Columns.Where(c => c.Visibility == Visibility.Visible), fillWindow: true));
-            AddMenuAction("Reset columns", ResetColumns);
+            menu.Items.Add(new Separator());
+            if (clicked != null)
+                AddMenuAction(menu, $"Size “{ColumnName(clicked)}” to fit", () => SizeColumnsToFit(new[] { clicked }, fillWindow: false));
+            AddMenuAction(menu, "Size all columns to fit", () => SizeColumnsToFit(BeatmapGrid.Columns.Where(c => c.IsVisible), fillWindow: true));
+            AddMenuAction(menu, "Reset columns", ResetColumns);
+
+            menu.Open(header);
         }
 
-        private void AddMenuAction(string header, Action action)
+        private static void AddMenuAction(ContextMenu menu, string header, Action action)
         {
             var item = new MenuItem { Header = header };
             item.Click += (_, _) => action();
-            _columnMenu.Items.Add(item);
+            menu.Items.Add(item);
         }
 
         // Measures each column against its header and the rows currently on screen (the list
@@ -564,8 +630,8 @@ namespace OsuScoutNew
         private void SizeColumnsToFit(IEnumerable<DataGridColumn> columns, bool fillWindow)
         {
             var list = columns.ToList();
-            foreach (var column in list) column.Width = new DataGridLength(1, DataGridLengthUnitType.Auto);
-            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            foreach (var column in list) column.Width = DataGridLength.Auto;
+            Dispatcher.UIThread.Post(() =>
             {
                 foreach (var column in list)
                 {
@@ -573,15 +639,15 @@ namespace OsuScoutNew
                     column.Width = new DataGridLength(column.ActualWidth, sharesSpace ? DataGridLengthUnitType.Star : DataGridLengthUnitType.Pixel);
                 }
                 SaveSettings();
-            }));
+            }, DispatcherPriority.Background);
         }
 
         private void ResetColumns()
         {
-            foreach (var (column, (width, visibility)) in _defaultColumns)
+            foreach (var (column, (width, visible)) in _defaultColumns)
             {
                 column.Width = width;
-                column.Visibility = visibility;
+                column.IsVisible = visible;
             }
             SaveSettings();
         }
@@ -593,71 +659,74 @@ namespace OsuScoutNew
             {
                 var column = BeatmapGrid.Columns.FirstOrDefault(c => c.SortMemberPath == setting.Key);
                 if (column == null) continue;
-                column.Visibility = setting.Visible ? Visibility.Visible : Visibility.Collapsed;
+                column.IsVisible = setting.Visible;
                 if (setting.Width > 0)
                     column.Width = new DataGridLength(setting.Width, setting.Star ? DataGridLengthUnitType.Star : DataGridLengthUnitType.Pixel);
             }
             // A hand-edited settings file could hide everything; an empty list helps nobody.
-            if (BeatmapGrid.Columns.All(c => c.Visibility != Visibility.Visible)) ResetColumns();
+            if (BeatmapGrid.Columns.All(c => !c.IsVisible)) ResetColumns();
         }
 
         private List<ColumnSetting> CurrentColumns() =>
             BeatmapGrid.Columns.Select(c => new ColumnSetting
             {
                 Key = c.SortMemberPath,
-                Visible = c.Visibility == Visibility.Visible,
+                Visible = c.IsVisible,
                 Star = c.Width.IsStar,
                 Width = c.Width.IsStar || c.Width.IsAbsolute ? c.Width.Value : c.ActualWidth
             }).ToList();
 
         private void PlayButton_Click(object sender, RoutedEventArgs e) => LaunchSelectedMap();
 
-        private void BeatmapGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) => LaunchSelectedMap();
-
-        private void ChangeFolderButton_Click(object sender, RoutedEventArgs e)
+        // Double-clicking a map (not the header) finds it in osu!.
+        private void BeatmapGrid_DoubleTapped(object sender, TappedEventArgs e)
         {
-            var dialog = new Microsoft.Win32.OpenFolderDialog();
-            dialog.Title = _client == OsuClient.Lazer
-                ? "Select your osu!lazer data folder (the one holding client.realm and files)"
-                : "Select your new osu! Songs Folder";
-
-            if (dialog.ShowDialog() == true)
-            {
-                string newPath = dialog.FolderName;
-                if (newPath.Equals(_source.Root, StringComparison.OrdinalIgnoreCase)) return;
-
-                if (_client == OsuClient.Lazer)
-                {
-                    if (!LazerLocationService.IsDataFolder(newPath))
-                    {
-                        MessageDialog.Show(this, "That isn't an osu!lazer data folder. The right one holds client.realm and a folder called files.",
-                            "Not a lazer folder", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        return;
-                    }
-                    _lazerDataFolder = newPath;
-                    _source = new LazerFilesSource(newPath);
-                }
-                else
-                {
-                    _songsFolder = newPath;
-                    _source = new StableSongsSource(newPath);
-                }
-                _liveTrackerService.StartTracking(_source);
-
-                using (var db = new OsuDbContext(_source.Kind))
-                {
-                    db.Beatmaps.RemoveRange(db.Beatmaps);
-                    db.SaveChanges();
-                }
-
-                BeatmapGrid.ItemsSource = null;
-                RunBackgroundScan();
-            }
+            if ((e.Source as Visual)?.FindAncestorOfType<DataGridRow>(includeSelf: true) != null)
+                LaunchSelectedMap();
         }
 
-        private void MainWindow_Loaded(object sender, RoutedEventArgs e)
+        private async void ChangeFolderButton_Click(object sender, RoutedEventArgs e)
         {
-            _ = UpdateAppAsync();
+            // Start where the current library is, or the home folder when there isn't one.
+            string start = System.IO.Directory.Exists(_source?.Root) ? _source.Root
+                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var picked = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+            {
+                Title = _client == OsuClient.Lazer
+                    ? "Select your osu!lazer data folder (the one holding client.realm and files)"
+                    : "Select your osu! Songs folder",
+                AllowMultiple = false,
+                SuggestedStartLocation = await StorageProvider.TryGetFolderFromPathAsync(start)
+            });
+            string newPath = picked.Count > 0 ? picked[0].TryGetLocalPath() : null;
+            if (string.IsNullOrEmpty(newPath) || newPath.Equals(_source.Root, StringComparison.OrdinalIgnoreCase)) return;
+
+            if (_client == OsuClient.Lazer)
+            {
+                if (!LazerLocationService.IsDataFolder(newPath))
+                {
+                    await MessageDialog.ShowAsync(this, "That isn't an osu!lazer data folder. The right one holds client.realm and a folder called files.",
+                        "Not a lazer folder", DialogButtons.Ok, DialogIcon.Warning);
+                    return;
+                }
+                _lazerDataFolder = newPath;
+                _source = new LazerFilesSource(newPath);
+            }
+            else
+            {
+                _songsFolder = newPath;
+                _source = new StableSongsSource(newPath);
+            }
+            _liveTrackerService.StartTracking(_source);
+
+            using (var db = new OsuDbContext(_source.Kind))
+            {
+                db.Beatmaps.RemoveRange(db.Beatmaps);
+                db.SaveChanges();
+            }
+
+            BeatmapGrid.ItemsSource = null;
+            RunBackgroundScan();
         }
 
         private async Task UpdateAppAsync()
@@ -667,15 +736,15 @@ namespace OsuScoutNew
                 // This fork's own releases. The original project's would replace the lazer
                 // support with its stable-only build (it ships as a different app, OsuScoutNew).
                 var mgr = new UpdateManager(new GithubSource("https://github.com/FrasierGH/OsuScout", null, false));
-                
+
                 var newVersion = await mgr.CheckForUpdatesAsync();
                 if (newVersion != null)
                 {
-                    var result = MessageDialog.Show(this,
+                    var result = await MessageDialog.ShowAsync(this,
                         $"A new update ({newVersion.TargetFullRelease.Version}) is available!\n\nWould you like to download and restart the app now?\nIf you click No, it will silently download and update automatically after you close the app.",
-                        "Update available", MessageBoxButton.YesNo, MessageBoxImage.Information);
+                        "Update available", DialogButtons.YesNo, DialogIcon.Information);
 
-                    if (result == MessageBoxResult.Yes)
+                    if (result == DialogResult.Yes)
                     {
                         await mgr.DownloadUpdatesAsync(newVersion);
                         SaveSettings(); // the restart exits without closing the window normally
@@ -694,64 +763,37 @@ namespace OsuScoutNew
             }
         }
 
-        private void BeatmapGrid_Sorting(object sender, DataGridSortingEventArgs e)
+        private async void LaunchSelectedMap()
         {
-            e.Handled = true;
-
-            var column = e.Column;
-            ListSortDirection? next;
-
-            // 3-state sort: Ascending -> Descending -> None
-            if (column.SortDirection == null)
-                next = ListSortDirection.Ascending;
-            else if (column.SortDirection == ListSortDirection.Ascending)
-                next = ListSortDirection.Descending;
-            else
-                next = null;
-
-            // Shift for multi-sort, but since they asked to sort multiple columns,
-            // if shift is NOT down, we clear the others
-            var shiftDown = Keyboard.IsKeyDown(Key.LeftShift) || Keyboard.IsKeyDown(Key.RightShift);
-
-            if (!shiftDown)
-                _sort.Clear();
-            else
-                _sort.RemoveAll(sd => sd.PropertyName == column.SortMemberPath);
-
-            if (next != null)
-                _sort.Add(new SortDescription(column.SortMemberPath, next.Value));
-
-            ApplySort();
-        }
-
-        private void LaunchSelectedMap()
-        {
-            if (BeatmapGrid.SelectedItem is BeatmapRecord selectedMap)
+            if (BeatmapGrid.SelectedItem is not BeatmapRecord selectedMap) return;
+            try
             {
-                try
-                {
-                    string searchQuery = GameClients.SongSelectSearch(_client, selectedMap.BeatmapID, selectedMap.Artist, selectedMap.Title, selectedMap.Version);
-                    Clipboard.SetText(searchQuery);
+                string searchQuery = GameClients.SongSelectSearch(_client, selectedMap.BeatmapID, selectedMap.Artist, selectedMap.Title, selectedMap.Version);
+                if (Clipboard != null) await Clipboard.SetTextAsync(searchQuery);
 
-                    bool focused = SystemInteropService.FocusOsuProcess(_client, _gameProcessNames);
-
-                    if (!focused)
-                    {
-                        MessageDialog.Show(this, $"osu! isn't running, so Scoutsu couldn't switch to it.\n\nThe search is on your clipboard ({searchQuery}): paste it into song select once osu! is open.",
-                            "osu! isn't running", MessageBoxButton.OK, MessageBoxImage.Information);
-                    }
-                }
-                catch (Exception ex)
+                switch (SystemInteropService.FocusOsuProcess(_client, _gameProcessNames))
                 {
-                    MessageDialog.Show(this, $"Couldn't switch to osu!: {ex.Message}", "Couldn't switch to osu!", MessageBoxButton.OK, MessageBoxImage.Error);
+                    case FocusResult.NotRunning:
+                        await MessageDialog.ShowAsync(this, $"osu! isn't running, so Scoutsu couldn't switch to it.\n\nThe search is on your clipboard ({searchQuery}): paste it into song select once osu! is open.",
+                            "osu! isn't running", DialogButtons.Ok, DialogIcon.Information);
+                        break;
+                    case FocusResult.CouldNotFocus:
+                        // Wayland (and X11 without xdotool) doesn't let an app bring another to the front.
+                        await MessageDialog.ShowAsync(this, $"The search is on your clipboard ({searchQuery}).\n\nSwitch to osu! and paste it into song select: this desktop doesn't let Scoutsu bring osu! to the front itself.",
+                            "Copied", DialogButtons.Ok, DialogIcon.Information);
+                        break;
                 }
+            }
+            catch (Exception ex)
+            {
+                await MessageDialog.ShowAsync(this, $"Couldn't switch to osu!: {ex.Message}", "Couldn't switch to osu!", DialogButtons.Ok, DialogIcon.Error);
             }
         }
 
         protected override void OnClosed(EventArgs e)
         {
             ScanLog.MarkAppClosed();
-            SaveSettings();
+            if (_source != null) SaveSettings();
             _liveTrackerService?.Dispose();
             _classifier?.Dispose();
             base.OnClosed(e);

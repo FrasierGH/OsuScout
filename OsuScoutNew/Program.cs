@@ -1,4 +1,5 @@
 using System;
+using Avalonia;
 using Velopack;
 
 namespace OsuScoutNew
@@ -8,12 +9,17 @@ namespace OsuScoutNew
         [STAThread]
         public static void Main(string[] args)
         {
-            // Velopack setup must run before ANY WPF initialization
+            // Velopack setup must run before any UI starts
             VelopackApp.Build().Run();
 
-            var app = new App();
-            app.InitializeComponent();
-            app.Run();
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
         }
+
+        // Also used by Avalonia's design-time tools.
+        public static AppBuilder BuildAvaloniaApp() =>
+            AppBuilder.Configure<App>()
+                .UsePlatformDetect()
+                .WithInterFont()
+                .LogToTrace();
     }
 }

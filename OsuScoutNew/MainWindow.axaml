@@ -1,0 +1,199 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:OsuScoutNew"
+        xmlns:controls="using:OsuScoutNew.Controls"
+        x:Class="OsuScoutNew.MainWindow"
+        Title="Scoutsu" Icon="/Assets/scoutsu.ico"
+        Width="1100" Height="680" MinWidth="780" MinHeight="460"
+        WindowStartupLocation="CenterScreen">
+
+    <Window.Resources>
+        <local:SecondsToClockConverter x:Key="Clock" />
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- Toolbar -->
+        <Border DockPanel.Dock="Top" Background="{StaticResource Brush.Window}" BorderBrush="{StaticResource Brush.Separator}"
+                BorderThickness="0,0,0,1" Padding="10,7">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock Text="Library:" VerticalAlignment="Center" Foreground="{StaticResource Brush.TextDim}" />
+                <ComboBox x:Name="ClientCombo" Width="120" SelectionChanged="ClientCombo_SelectionChanged"
+                          ToolTip.Tip="Which osu! client's maps to show. Each keeps its own library.">
+                    <ComboBoxItem Content="osu!stable" />
+                    <ComboBoxItem Content="osu!lazer" />
+                </ComboBox>
+                <Button x:Name="FolderButton" Content="Folder…" Click="ChangeFolderButton_Click" />
+            </StackPanel>
+        </Border>
+
+        <!-- Status bar -->
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource Brush.Window}" BorderBrush="{StaticResource Brush.Separator}"
+                BorderThickness="0,1,0,0" Padding="10,4">
+            <DockPanel>
+                <StackPanel x:Name="ProgressPanel" DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8" IsVisible="False">
+                    <ProgressBar x:Name="ScanProgressBar" Width="160" Minimum="0" Maximum="100" VerticalAlignment="Center" />
+                    <TextBlock x:Name="ScanProgressText" VerticalAlignment="Center" />
+                </StackPanel>
+                <TextBlock x:Name="LibraryStatusText" Foreground="{StaticResource Brush.TextDim}" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis" />
+            </DockPanel>
+        </Border>
+
+        <!-- Action bar -->
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource Brush.Panel}" Padding="10,8">
+            <DockPanel>
+                <Button x:Name="PlayButton" DockPanel.Dock="Right" Classes="primary" Content="Copy &amp; switch to osu!"
+                        Click="PlayButton_Click"
+                        ToolTip.Tip="Copies the map's beatmap ID (lazer) or artist, title and difficulty (stable), then switches to osu!. Paste it into song select." />
+                <TextBlock x:Name="SelectionText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,12,0"
+                           Foreground="{StaticResource Brush.TextMuted}"
+                           Text="Select a map, or double-click it, to find it in osu!'s song select." />
+            </DockPanel>
+        </Border>
+
+        <!-- Filters | map list -->
+        <Grid Background="{StaticResource Brush.Panel}" ColumnDefinitions="250,9,*">
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" MinWidth="200" MaxWidth="420">
+                <StackPanel Margin="12,12,6,12">
+                    <TextBlock Text="Search" Classes="section" />
+                    <TextBox x:Name="SearchBox" TextChanged="SearchInput_TextChanged"
+                             ToolTip.Tip="Matches artist, title, difficulty name or mapper" />
+                    <TextBlock Text="Artist, title, difficulty or mapper" Classes="hint" Margin="0,3,0,14" />
+
+                    <TextBlock Text="Tags" Classes="section" />
+                    <AutoCompleteBox x:Name="TagSearchBox" FilterMode="Custom" MinimumPrefixLength="0"
+                                     TextChanged="SearchInput_TextChanged" />
+                    <TextBlock Classes="hint" Margin="0,3,0,16"
+                               Text="Separate tags with commas. Put - in front of a tag to exclude it, e.g. aim, -streams" />
+
+                    <!-- Each filter's value text is filled in by UpdateFilterLabels(). A handle parked at
+                         the end of its track means "no limit", shown as "Any", "Up to x" or "x+". -->
+                    <DockPanel Margin="0,0,0,2">
+                        <Button x:Name="StarResetButton" DockPanel.Dock="Right" Content="✕" Classes="reset" Click="ResetSlider_Click" ToolTip.Tip="Clear star filter" />
+                        <TextBlock x:Name="StarValueText" DockPanel.Dock="Right" VerticalAlignment="Center" />
+                        <TextBlock Text="Stars" Classes="section" Margin="0" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <controls:RangeSlider x:Name="StarSlider" Minimum="0" Maximum="10" MinRange="0.5" LowerValue="0" UpperValue="10" TickFrequency="0.5" Margin="0,0,0,12" />
+
+                    <DockPanel Margin="0,0,0,2">
+                        <Button x:Name="BpmResetButton" DockPanel.Dock="Right" Content="✕" Classes="reset" Click="ResetSlider_Click" ToolTip.Tip="Clear BPM filter" />
+                        <TextBlock x:Name="BpmValueText" DockPanel.Dock="Right" VerticalAlignment="Center" />
+                        <TextBlock Text="BPM" Classes="section" Margin="0" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <controls:RangeSlider x:Name="BpmSlider" Minimum="0" Maximum="300" MinRange="10" LowerValue="0" UpperValue="300" TickFrequency="10" Margin="0,0,0,12" />
+
+                    <DockPanel Margin="0,0,0,2">
+                        <Button x:Name="LengthResetButton" DockPanel.Dock="Right" Content="✕" Classes="reset" Click="ResetSlider_Click" ToolTip.Tip="Clear length filter" />
+                        <TextBlock x:Name="LengthValueText" DockPanel.Dock="Right" VerticalAlignment="Center" />
+                        <TextBlock Text="Length" Classes="section" Margin="0" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <!-- Starts at 0 and keeps the handles a minute apart, so dragging the right handle all the
+                         way left lands on "Up to 1 min" (short / cut-ver maps) -->
+                    <controls:RangeSlider x:Name="LengthSlider" Minimum="0" Maximum="20" MinRange="1" LowerValue="0" UpperValue="20" TickFrequency="1" Margin="0,0,0,12" />
+
+                    <DockPanel Margin="0,0,0,2" ToolTip.Tip="Circle size">
+                        <Button x:Name="CsResetButton" DockPanel.Dock="Right" Content="✕" Classes="reset" Click="ResetSlider_Click" ToolTip.Tip="Clear CS filter" />
+                        <TextBlock x:Name="CsValueText" DockPanel.Dock="Right" VerticalAlignment="Center" />
+                        <TextBlock Text="CS" Classes="section" Margin="0" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <controls:RangeSlider x:Name="CsSlider" Minimum="0" Maximum="10" MinRange="0.1" LowerValue="0" UpperValue="10" TickFrequency="0.1" Margin="0,0,0,12" />
+
+                    <DockPanel Margin="0,0,0,2" ToolTip.Tip="Approach rate">
+                        <Button x:Name="ArResetButton" DockPanel.Dock="Right" Content="✕" Classes="reset" Click="ResetSlider_Click" ToolTip.Tip="Clear AR filter" />
+                        <TextBlock x:Name="ArValueText" DockPanel.Dock="Right" VerticalAlignment="Center" />
+                        <TextBlock Text="AR" Classes="section" Margin="0" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <controls:RangeSlider x:Name="ArSlider" Minimum="0" Maximum="10" MinRange="0.1" LowerValue="0" UpperValue="10" TickFrequency="0.1" Margin="0,0,0,12" />
+
+                    <DockPanel Margin="0,0,0,2" ToolTip.Tip="Overall difficulty (accuracy)">
+                        <Button x:Name="OdResetButton" DockPanel.Dock="Right" Content="✕" Classes="reset" Click="ResetSlider_Click" ToolTip.Tip="Clear OD filter" />
+                        <TextBlock x:Name="OdValueText" DockPanel.Dock="Right" VerticalAlignment="Center" />
+                        <TextBlock Text="OD" Classes="section" Margin="0" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <controls:RangeSlider x:Name="OdSlider" Minimum="0" Maximum="10" MinRange="0.1" LowerValue="0" UpperValue="10" TickFrequency="0.1" Margin="0,0,0,12" />
+
+                    <DockPanel Margin="0,0,0,2" ToolTip.Tip="HP drain">
+                        <Button x:Name="HpResetButton" DockPanel.Dock="Right" Content="✕" Classes="reset" Click="ResetSlider_Click" ToolTip.Tip="Clear HP filter" />
+                        <TextBlock x:Name="HpValueText" DockPanel.Dock="Right" VerticalAlignment="Center" />
+                        <TextBlock Text="HP" Classes="section" Margin="0" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <controls:RangeSlider x:Name="HpSlider" Minimum="0" Maximum="10" MinRange="0.1" LowerValue="0" UpperValue="10" TickFrequency="0.1" Margin="0,0,0,18" />
+
+                    <TextBlock Classes="hint"
+                               Text="Click a column header to sort, Shift-click to sort by more than one. Right-click a header to hide columns or size them to fit." />
+                </StackPanel>
+            </ScrollViewer>
+
+            <GridSplitter Grid.Column="1" ResizeDirection="Columns" HorizontalAlignment="Stretch" />
+
+            <DataGrid x:Name="BeatmapGrid" Grid.Column="2" Margin="0,12,12,0" IsReadOnly="True"
+                      SelectionMode="Single" GridLinesVisibility="None" HeadersVisibility="Column"
+                      CanUserSortColumns="True" CanUserResizeColumns="True" CanUserReorderColumns="False"
+                      DoubleTapped="BeatmapGrid_DoubleTapped" SelectionChanged="BeatmapGrid_SelectionChanged"
+                      Sorting="BeatmapGrid_Sorting" LoadingRow="BeatmapGrid_LoadingRow">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Artist" Binding="{Binding Artist}" Width="*" SortMemberPath="Artist" />
+                    <DataGridTextColumn Header="Title" Binding="{Binding Title}" Width="1.4*" SortMemberPath="Title" />
+                    <DataGridTextColumn Header="Difficulty" Binding="{Binding Version}" Width="*" SortMemberPath="Version" />
+                    <DataGridTextColumn Header="Mapper" Binding="{Binding Mapper}" Width="0.7*" SortMemberPath="Mapper" />
+                    <DataGridTemplateColumn Header="★" Width="52" MinWidth="46" SortMemberPath="StarRating">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Classes="stars" Text="{Binding StarRating, StringFormat={}{0:F2}}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="BPM" Width="56" MinWidth="54" SortMemberPath="BPM">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Classes="number" Text="{Binding BPM, StringFormat={}{0:0}}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Length" Width="66" MinWidth="64" SortMemberPath="LengthSeconds">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Classes="number" Text="{Binding LengthSeconds, Converter={StaticResource Clock}}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="CS" Width="46" MinWidth="44" SortMemberPath="CS">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Classes="number" Text="{Binding CS, StringFormat={}{0:0.#}}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="AR" Width="46" MinWidth="44" SortMemberPath="AR">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Classes="number" Text="{Binding AR, StringFormat={}{0:0.#}}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="OD" Width="46" MinWidth="44" SortMemberPath="OD">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Classes="number" Text="{Binding OD, StringFormat={}{0:0.#}}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="HP" Width="46" MinWidth="44" SortMemberPath="HP">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Classes="number" Text="{Binding HP, StringFormat={}{0:0.#}}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTemplateColumn Header="Tags" Width="1.6*" SortMemberPath="Tags">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Tags}" Foreground="{StaticResource Brush.TextDim}" ToolTip.Tip="{Binding Tags}" />
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Grid>
+    </DockPanel>
+</Window>
